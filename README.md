@@ -1,2 +1,2 @@
-# gestion-taches-cli
-Application CLI de gestion de tâches en Python
+PySide6>=6.7.0
+python-vlc>=3.0.20123

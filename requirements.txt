@@ -1,0 +1,195 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QAction
+from PySide6.QtWidgets import (
+    QApplication,
+    QFileDialog,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QMainWindow,
+    QMessageBox,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+    QComboBox,
+)
+
+from .importer import parse_m3u_file
+from .models import Channel
+from .player import VideoPlayer
+from .storage import ensure_data_files, load_favorites, sample_channels, save_favorites
+
+
+class MainWindow(QMainWindow):
+    def __init__(self) -> None:
+        super().__init__()
+        self.setWindowTitle("RLD TV")
+        self.resize(1200, 760)
+        self.channels = sample_channels()
+        self.favorites = set(load_favorites())
+        self.current_channel: Channel | None = None
+        self.search_text = ""
+        self.country_filter = "Tous"
+
+        self._build_ui()
+        self.populate_channels()
+
+    def _build_ui(self) -> None:
+        central = QWidget()
+        root = QHBoxLayout(central)
+
+        left = QWidget()
+        left_layout = QVBoxLayout(left)
+
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("Rechercher une chaîne...")
+        self.search_input.textChanged.connect(self.on_search)
+        left_layout.addWidget(self.search_input)
+
+        self.country_combo = QComboBox()
+        self.country_combo.addItem("Tous")
+        self.country_combo.addItems(sorted({channel.country for channel in self.channels}))
+        self.country_combo.currentTextChanged.connect(self.on_country_changed)
+        left_layout.addWidget(self.country_combo)
+
+        self.channel_list = QListWidget()
+        self.channel_list.itemDoubleClicked.connect(self.on_channel_double_click)
+        left_layout.addWidget(self.channel_list)
+
+        self.import_button = QPushButton("Importer M3U")
+        self.import_button.clicked.connect(self.import_m3u)
+        left_layout.addWidget(self.import_button)
+
+        root.addWidget(left, 35)
+
+        right = QWidget()
+        right_layout = QVBoxLayout(right)
+
+        top_buttons = QHBoxLayout()
+        self.play_button = QPushButton("Lecture")
+        self.pause_button = QPushButton("Pause")
+        self.stop_button = QPushButton("Stop")
+        self.favorite_button = QPushButton("Ajouter aux favoris")
+        self.fullscreen_button = QPushButton("Plein écran")
+
+        self.play_button.clicked.connect(self.play_current)
+        self.pause_button.clicked.connect(self.pause_current)
+        self.stop_button.clicked.connect(self.stop_current)
+        self.favorite_button.clicked.connect(self.toggle_favorite)
+        self.fullscreen_button.clicked.connect(self.toggle_fullscreen)
+
+        for button in (
+            self.play_button,
+            self.pause_button,
+            self.stop_button,
+            self.favorite_button,
+            self.fullscreen_button,
+        ):
+            top_buttons.addWidget(button)
+
+        right_layout.addLayout(top_buttons)
+
+        self.video_panel = QWidget()
+        self.video_panel.setStyleSheet("background: #111; border: 1px solid #333;")
+        self.video_panel.setMinimumHeight(420)
+        right_layout.addWidget(self.video_panel)
+
+        info = QWidget()
+        info_layout = QVBoxLayout(info)
+        self.title_label = QLabel("Aucune chaîne sélectionnée")
+        self.title_label.setStyleSheet("font-size: 18px; font-weight: bold;")
+        self.meta_label = QLabel("Sélectionnez une chaîne pour commencer")
+        info_layout.addWidget(self.title_label)
+        info_layout.addWidget(self.meta_label)
+        right_layout.addWidget(info)
+
+        root.addWidget(right, 65)
+        self.setCentralWidget(central)
+
+        self.player = VideoPlayer(self.video_panel)
+        self.player.attach()
+
+    def populate_channels(self) -> None:
+        self.channel_list.clear()
+        visible = self.channels
+
+        if self.country_filter != "Tous":
+            visible = [channel for channel in visible if channel.country == self.country_filter]
+        if self.search_text:
+            text = self.search_text.lower()
+            visible = [channel for channel in visible if text in channel.name.lower() or text in channel.country.lower()]
+
+        for channel in visible:
+            item = QListWidgetItem(f"{channel.name}  •  {channel.country}")
+            item.setData(Qt.UserRole, channel)
+            self.channel_list.addItem(item)
+
+    def on_search(self, text: str) -> None:
+        self.search_text = text.strip()
+        self.populate_channels()
+
+    def on_country_changed(self, country: str) -> None:
+        self.country_filter = country
+        self.populate_channels()
+
+    def on_channel_double_click(self, item: QListWidgetItem) -> None:
+        channel: Channel = item.data(Qt.UserRole)
+        self.current_channel = channel
+        self.play_channel(channel)
+
+    def play_channel(self, channel: Channel) -> None:
+        self.current_channel = channel
+        self.title_label.setText(channel.name)
+        self.meta_label.setText(f"{channel.country} • {channel.category} • {'En direct' if channel.is_live else 'Vidéo'}")
+        self.player.play_channel(channel)
+        self.favorite_button.setText("Retirer des favoris" if channel.id in self.favorites else "Ajouter aux favoris")
+
+    def play_current(self) -> None:
+        if self.current_channel is not None:
+            self.player.play_channel(self.current_channel)
+
+    def pause_current(self) -> None:
+        self.player.pause()
+
+    def stop_current(self) -> None:
+        self.player.stop()
+
+    def toggle_fullscreen(self) -> None:
+        self.player.toggle_fullscreen()
+
+    def toggle_favorite(self) -> None:
+        if self.current_channel is None:
+            return
+        if self.current_channel.id in self.favorites:
+            self.favorites.remove(self.current_channel.id)
+        else:
+            self.favorites.add(self.current_channel.id)
+        save_favorites(sorted(self.favorites))
+        self.favorite_button.setText("Retirer des favoris" if self.current_channel.id in self.favorites else "Ajouter aux favoris")
+
+    def import_m3u(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Importer une liste M3U", str(Path.home()), "M3U Files (*.m3u *.m3u8)")
+        if not path:
+            return
+        try:
+            imported = parse_m3u_file(path)
+        except Exception as exc:
+            QMessageBox.critical(self, "Erreur d'import", str(exc))
+            return
+
+        if not imported:
+            QMessageBox.information(self, "Aucune chaîne", "Aucune chaîne n'a été détectée dans ce fichier.")
+            return
+
+        self.channels = imported + self.channels
+        self.country_combo.clear()
+        self.country_combo.addItem("Tous")
+        self.country_combo.addItems(sorted({channel.country for channel in self.channels}))
+        self.populate_channels()
+        QMessageBox.information(self, "Import réussi", f"{len(imported)} chaîne(s) ajoutée(s).")
